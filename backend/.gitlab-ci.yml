@@ -1,0 +1,135 @@
+cache:
+  paths:
+    - backend-helm
+
+variables:
+  VERSION: 1.0.${CI_PIPELINE_ID}
+
+include:
+# - template: Security/SAST.gitlab-ci.yml
+- remote: 'https://gitlab.com/gitlab-org/gitlab/-/raw/2851f4d5/lib/gitlab/ci/templates/Jobs/SAST.latest.gitlab-ci.yml'
+- project: 'templates/ci'
+  file: 'DockerInDockerTemplate.yml'
+
+stages:
+  - unit-test
+  - build
+  - test
+  - release
+  - deploy
+
+unit-test-backend:
+  stage: unit-test
+  image: golang:latest
+  script:
+    - cd backend
+    - >
+      go test -v ./...
+
+
+build-backend-job:
+  stage: build
+  image: docker:20.10.12-dind-rootless
+  before_script:
+    - until docker info; do sleep 1; done
+    # переменные CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY генерятся Гитлабом, их задавать не надо
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd backend
+    - >
+      docker build
+      --build-arg VERSION=$VERSION
+      --tag $CI_REGISTRY_IMAGE/momo-backend:$CI_COMMIT_SHA
+      .
+    - docker push $CI_REGISTRY_IMAGE/momo-backend:$CI_COMMIT_SHA
+  needs:
+  - unit-test-backend
+
+build-backend-helm-chart:
+  stage: build
+  image: alpine/helm:latest
+  before_script:
+    - echo "$DOCKERCONFIGJSON_BACK" > ./backend-helm/backend-charts/templates/secrets.yaml
+  script:
+    - helm package -d ./backend-helm ./backend-helm/backend-charts --version ${VERSION}
+  after_script:
+    - rm -f ./backend-helm/backend-charts/templates/secrets.yaml
+  
+  artifacts:
+    paths:
+      - backend-helm
+  
+  needs:
+  - build-backend-job
+
+sonarqube-backend-sast:
+  stage: test
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  script:
+    - echo $BACKEND_KEY
+    - echo $SONARQUBE_URL
+    - echo $BACKEND_LOGIN
+    - cd backend
+    - >
+      sonar-scanner
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.projectKey=${BACKEND_KEY}
+      -Dsonar.sources=.
+      -Dsonar.exclusions=**/*_test.go
+      -Dsonar.tests=.
+      -Dsonar.test.inclusions=**/*_test.go
+      -Dsonar.host.url=${SONARQUBE_URL}
+      -Dsonar.login=${BACKEND_LOGIN}
+  needs: 
+    - build-backend-job
+    
+upload-backend-release:
+  variables:
+    GIT_STRATEGY: none
+  image: docker:20.10.12-dind-rootless
+  stage: release
+  before_script:
+    - until docker info; do sleep 1; done
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  artifacts:
+    paths:
+      - frontend-helm
+  needs:
+    - sonarqube-backend-sast
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/momo-backend:$CI_COMMIT_SHA
+    # если образ прошел проверки в CI (сканирование, тесты и т.д), то тегаем latest
+    - docker tag $CI_REGISTRY_IMAGE/momo-backend:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/momo-backend:latest
+    - docker push $CI_REGISTRY_IMAGE/momo-backend:latest
+
+upload-backend-helm-chart:
+  stage: release
+  script:
+    - curl -v -u "${NEXUS_REPO_USER}:${NEXUS_REPO_PASS}" --upload-file backend-helm/momo-store-backend-${VERSION}.tgz ${NEXUS_REPO_URL}/momo-store-firsov-vasily-backend/momo-store-backend-${VERSION}.tgz
+  needs:
+    - build-backend-helm-chart
+    - upload-backend-release
+
+deploy-momo-store-backend:
+  stage: deploy
+  image: dtzar/helm-kubectl:latest
+
+  before_script:
+    - mkdir ~/.kube
+    - touch ~/.kube/config
+    - echo "$KUBECFG" > ~/.kube/config
+    - touch ~/.kube/ca.pem
+    - echo "$KUBECA" > ~/.kube/ca.pem
+  script:
+    - kubectl config set-context --current --namespace=$NAMESPACE
+    - helm repo add nexus $NEXUS_REPO_URL/momo-store-firsov-vasily-backend/ --username ${NEXUS_REPO_USER} --password ${NEXUS_REPO_PASS}
+    - helm repo update
+    - helm upgrade --install momo-store-backend nexus/momo-store-backend
+  after_script:
+    - rm -f ~/.kube/config
+    - rm -f ~/.kube/ca.pem
+  needs:
+    - upload-backend-helm-chart
+    - upload-backend-release

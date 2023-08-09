@@ -1,0 +1,118 @@
+cache:
+  paths:
+    - frontend-helm
+
+variables:
+  VERSION: 1.0.${CI_PIPELINE_ID}
+
+include:
+# - template: Security/SAST.gitlab-ci.yml
+- remote: 'https://gitlab.com/gitlab-org/gitlab/-/raw/2851f4d5/lib/gitlab/ci/templates/Jobs/SAST.latest.gitlab-ci.yml'
+- project: 'templates/ci'
+  file: 'DockerInDockerTemplate.yml'
+
+stages:
+  - build
+  - test
+  - release
+  - deploy
+
+build-frontend-code-job:
+  stage: build
+  image: docker:20.10.12-dind-rootless
+  before_script:
+    - until docker info; do sleep 1; done
+    # переменные CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY генерятся Гитлабом, их задавать не надо
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd frontend
+    - >
+      docker build
+      --build-arg VERSION=$VERSION
+      --tag $CI_REGISTRY_IMAGE/momo-frontend:$CI_COMMIT_SHA
+      .
+    - docker push $CI_REGISTRY_IMAGE/momo-frontend:$CI_COMMIT_SHA
+
+build-frontend-helm-chart:
+  stage: build
+  image: alpine/helm:latest
+  before_script:
+    - echo "$DOCKERCONFIGJSON_FRONT" > ./frontend-helm/frontend-charts/templates/secrets.yaml
+    - echo "$TLS_SECRET" > ./frontend-helm/frontend-charts/templates/tls.yaml
+  script:
+    - helm package -d ./frontend-helm/ ./frontend-helm/frontend-charts/ --version ${VERSION}
+  after_script:
+    - rm -f ./frontend-helm/frontend-charts/templates/secrets.yaml
+    - rm -f ./frontend-helm/frontend-charts/templates/tls.yaml
+  artifacts:
+    paths:
+      - frontend-helm
+  needs:
+  - build-frontend-code-job
+
+sonarqube-frontend-sast:
+  stage: test
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  script:
+    - cd frontend
+    - >
+      sonar-scanner
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.projectKey=${FRONTEND_KEY}
+      -Dsonar.sources=.
+      -Dsonar.host.url=${SONARQUBE_URL}
+      -Dsonar.login=${FRONTEND_LOGIN}
+
+  needs:
+    - build-frontend-code-job
+
+upload-frontend-release:
+  variables:
+    GIT_STRATEGY: none
+  image: docker:20.10.12-dind-rootless
+  stage: release
+  before_script:
+    - until docker info; do sleep 1; done
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/momo-frontend:$CI_COMMIT_SHA
+    # если образ прошел проверки в CI (сканирование, тесты и т.д), то тегаем latest
+    - docker tag $CI_REGISTRY_IMAGE/momo-frontend:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/momo-frontend:latest
+    - docker push $CI_REGISTRY_IMAGE/momo-frontend:latest  
+  artifacts:
+    paths:
+      - frontend-helm
+  needs:
+    - sonarqube-frontend-sast
+
+upload-frontend-helm-chart:
+  stage: release
+  script:
+    - curl -v -u "${NEXUS_REPO_USER}:${NEXUS_REPO_PASS}" --upload-file frontend-helm/momo-store-frontend-${VERSION}.tgz ${NEXUS_REPO_URL}/momo-store-firsov-vasily-frontend/momo-store-frontend-${VERSION}.tgz
+  needs:
+    - build-frontend-helm-chart
+    - upload-frontend-release
+
+deploy-momo-store-frontend:
+  stage: deploy
+  image: dtzar/helm-kubectl:latest
+
+  before_script:
+    - mkdir ~/.kube
+    - touch ~/.kube/config
+    - echo "$KUBECFG" > ~/.kube/config
+    - touch ~/.kube/ca.pem
+    - echo "$KUBECA" > ~/.kube/ca.pem
+  script:
+    - kubectl config set-context --current --namespace=$NAMESPACE
+    - helm repo add nexus $NEXUS_REPO_URL/momo-store-firsov-vasily-frontend/ --username ${NEXUS_REPO_USER} --password ${NEXUS_REPO_PASS}
+    - helm repo update
+    - helm upgrade --install momo-store-frontend nexus/momo-store-frontend
+  after_script:
+    - rm -f ~/.kube/config
+    - rm -f ~/.kube/ca.pem
+  needs:
+    - upload-frontend-helm-chart
+    - upload-frontend-release

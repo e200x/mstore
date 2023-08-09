@@ -1,0 +1,53 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Values.namespace | quote }}
+  labels:
+    app.kubernetes.io/instance: "{{ .Release.Name }}"
+    app.kubernetes.io/version: "{{ .Chart.AppVersion }}"
+    app.kubernetes.io/managed-by: "{{ .Release.Service }}"
+    helm.sh/chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    app.kubernetes.io/component: {{ .Chart.Name }}
+    app.kubernetes.io/part-of: momo-store
+    app: {{ .Chart.Name }}
+spec:
+  replicas: {{ .Values.deployment.replicas }}
+  revisionHistoryLimit: {{ .Values.deployment.revisionHistoryLimit }}
+  strategy:
+    type: {{ .Values.deployment.strategy.type }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.deployment.rollingUpdate.maxUnavalible }}
+      maxSurge: {{ .Values.deployment.rollingUpdate.maxSurge }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+      annotations:
+        prometheus.io/path: {{ .Values.annotations.path }}
+        prometheus.io/port: "{{ .Values.annotations.port }}"
+        prometheus.io/scrape: "{{ .Values.annotations.scrape }}"
+    spec:
+      containers:
+          - image: "{{ .Values.deployment.image }}:{{ .Chart.AppVersion }}"
+            name: {{ .Chart.Name }}
+            imagePullPolicy: {{ .Values.deployment.imagePullPolicy }}
+            resources:
+{{ toYaml .Values.deployment.resources | indent 14 }}
+            ports:
+              - name: {{ .Chart.Name }}
+                containerPort: {{ .Values.deployment.ports.containerPort }}
+            livenessProbe:
+              httpGet:
+                path: {{ .Values.deployment.livenessProbe.path }}
+                port: {{ .Values.deployment.livenessProbe.port }}
+              initialDelaySeconds: {{ .Values.deployment.livenessProbe.initialDelaySeconds }}
+              periodSeconds: {{ .Values.deployment.livenessProbe.periodSeconds }}
+              timeoutSeconds: {{ .Values.deployment.livenessProbe.timeoutSeconds }}
+              failureThreshold: {{ .Values.deployment.livenessProbe.failureThreshold }}
+      imagePullSecrets:
+        - name: {{ .Values.deployment.imagePullSecrets.name }}

@@ -1,0 +1,56 @@
+namespace: default
+deployment:
+  replicas: 2
+  revisionHistoryLimit: 15
+  strategy:
+    type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 20%
+  image: gitlab.praktikum-services.ru:5050/std-014-16/momo-store/momo-backend
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "500m"
+    limits:
+      memory: "128Mi"
+      cpu: "800m"
+  ports:
+    containerPort: 8081
+  livenessProbe:
+    path: /health
+    port: 8081
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 1
+    failureThreshold: 6
+  imagePullSecrets:
+    name: docker-config-secret-back
+
+annotations:
+  path: /metrics
+  port: 8081
+  scrape: "true"
+
+service:
+  type: ClusterIP
+  ports:
+    port: 8081
+    protocol: TCP
+    targetPort: 8081
+
+vpa:
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      containerName: "*"
+  minAllowed:
+    cpu: 256m
+    memory: 128Mi
+  maxAllowed:
+    cpu: 1
+    memory: 500Mi
+  controlledResources: '["cpu", "memory"]'
+  controlledValues: RequestsAndLimits
